@@ -26,6 +26,31 @@ and this project aims to follow [Semantic Versioning](https://semver.org/).
 
 - **Android uploads** no longer fail with `open /document/primary%3A…: no such file or directory` when picking photos via the Storage Access Framework. Content URIs are streamed into a temp file before `go-pd` upload. (#5)
 
+## [1.4.1] - 2026-10-10
+
+### Added
+
+- Frameless windows (main, Settings, History) with a custom top bar: settings, history, minimize and close buttons, drag by the bar.
+- Drag and drop of files onto the window.
+- Command-line arguments: `Drainy.exe <file>` queues the file and starts the upload (for the "Send to" menu).
+- Windows installer (Inno Setup, per-user install, no UAC) and `build.bat` that builds both `Drainy.exe` and the installer.
+- Application icon is embedded in the exe and shown in the taskbar.
+- Upload history as a scrollable list with copy-link buttons.
+
+### Changed
+
+- The API key is stored in Windows Credential Manager instead of the plain-text preferences file. An old key in preferences is migrated automatically and removed.
+- Main screen redesign: compact 400x580 window, graphite palette, custom scrollbar, larger drop zone.
+- Uploads use a streamed multipart body with a 4 MiB copy buffer; the link is copied to the clipboard automatically after upload.
+- Upload client has connect and response-header timeouts. Long transfers are not limited.
+
+### Fixed
+
+- Opening Settings crashed the app (theme applied before the native window existed).
+- "Add files" did not open on Windows (invalid multi-select filter string).
+- History showed a generic error when no API key was set; it now explains that the account is not connected.
+- Uninstall left `Drainy.exe` behind when the app was running.
+
 ## [1.3.0] - 2026-07-31
 
 ### Changed

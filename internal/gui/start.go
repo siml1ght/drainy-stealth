@@ -3,6 +3,7 @@ package gui
 import (
 	"errors"
 	"fmt"
+	"image/color"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -15,24 +16,22 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/data/binding"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 	"github.com/ManuelReschke/go-pd-gui/internal/filepick"
 	"github.com/ManuelReschke/go-pd-gui/internal/fileprep"
 	"github.com/ManuelReschke/go-pd-gui/internal/uploadutil"
-	"github.com/ManuelReschke/go-pd/pkg/pd"
-	req2 "github.com/imroc/req/v3"
 )
 
 const (
-	Version      = "v1.3.0"
+	Version      = "v1.4.1"
 	AppID        = "com.gopdgui.app"
 	WindowTitle  = "Go-PD-GUI - DRAINY - PixelDrain Upload Tool"
-	WindowWidth  = 550
-	WindowHeight = 650
+	WindowWidth  = 400
+	WindowHeight = 580
 
-	Headline        = "PixelDrain.com Upload Tool"
 	ButtonCopy      = "Copy"
 	ButtonUpload    = "Upload"
 	ButtonAddFiles  = "Add files"
@@ -78,6 +77,9 @@ var MyApp AppData
 
 func BuildStart() {
 	MyApp.App = app.NewWithID(AppID)
+	// App icon: Fyne applies it to every window, so the taskbar shows the same
+	// artwork as the .exe (the exe icon comes from rsrc.syso / main.rc).
+	MyApp.App.SetIcon(appIconResource)
 	loadAndApplyTheme()
 
 	MyApp.Window = MyApp.App.NewWindow(WindowTitle)
@@ -88,10 +90,7 @@ func BuildStart() {
 	MyApp.Settings.Username = binding.NewString()
 	MyApp.Settings.Subscription = binding.NewString()
 	// Seed from preferences so upload works without opening Settings first.
-	_ = MyApp.Settings.APIKey.Set(MyApp.App.Preferences().StringWithFallback(SettingAPIKey, ""))
-
-	// Main Menu
-	MyApp.Window.SetMainMenu(BuildMainMenu())
+	_ = MyApp.Settings.APIKey.Set(storedAPIKey(MyApp.App.Preferences()))
 
 	// binding result link
 	linkBound := binding.NewString()
@@ -100,27 +99,60 @@ func BuildStart() {
 	containerCopySuccess := container.New(layout.NewCenterLayout(), copySuccessWidget)
 	containerCopySuccess.Hide()
 
-	// LINK RESULT
-	copyLinkButton := widget.NewButtonWithIcon(ButtonCopy, theme.ContentCopyIcon(), func() {
-		if content, err := linkBound.Get(); err == nil {
-			MyApp.Window.Clipboard().SetContent(content)
-			containerCopySuccess.Show()
-			go func() {
-				time.Sleep(3 * time.Second)
-				fyne.Do(func() {
-					if containerCopySuccess.Visible() {
-						containerCopySuccess.Hide()
-					}
-				})
-			}()
+	// RESULT CARD: link, copy and open buttons, and a status line that confirms
+	// the link is already in the clipboard after an upload.
+	var copyLinkButton *widget.Button
+	copyClickID := 0 // защита от наложения таймеров при быстрых нажатиях
+	var currentResultURL string
+
+	resultTitle := widget.NewLabelWithStyle("Ссылка готова", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	resultStatus := widget.NewLabel("")
+	resultStatus.Importance = widget.SuccessImportance
+	resultWidget := widget.NewHyperlink(EmptyString, nil)
+	resultWidget.Wrapping = fyne.TextWrapWord
+
+	showCopyFeedback := func(text string) {
+		copyClickID++
+		myID := copyClickID
+		resultStatus.SetText(text)
+		copyLinkButton.SetText("Скопировано")
+		go func() {
+			time.Sleep(2 * time.Second)
+			fyne.Do(func() {
+				if myID != copyClickID {
+					return
+				}
+				copyLinkButton.SetText(ButtonCopy)
+				resultStatus.SetText("Ссылка в буфере обмена")
+			})
+		}()
+	}
+
+	copyLinkButton = widget.NewButtonWithIcon(ButtonCopy, theme.ContentCopyIcon(), func() {
+		content, err := linkBound.Get()
+		if err != nil || content == "" {
+			return
+		}
+		MyApp.Window.Clipboard().SetContent(content)
+		showCopyFeedback("Скопировано в буфер обмена")
+	})
+
+	openLinkButton := widget.NewButtonWithIcon("Открыть", theme.ComputerIcon(), func() {
+		if currentResultURL == "" {
+			return
+		}
+		if u, err := url.Parse(currentResultURL); err == nil {
+			_ = MyApp.App.OpenURL(u)
 		}
 	})
-	containerLinkText := container.New(layout.NewCenterLayout(), copyLinkButton)
 
-	resultWidget := widget.NewHyperlink(EmptyString, nil)
-	containerLinkBox := container.New(layout.NewCenterLayout(), resultWidget)
-
-	resultContainer := container.New(layout.NewHBoxLayout(), containerLinkBox, containerLinkText, containerCopySuccess)
+	resultButtons := container.NewGridWithColumns(2, copyLinkButton, openLinkButton)
+	resultCard := widget.NewCard(
+		"",
+		"",
+		container.NewVBox(resultTitle, resultWidget, resultStatus, resultButtons),
+	)
+	resultContainer := container.NewVBox(resultCard)
 	resultContainer.Hide()
 
 	// PROGRESSBAR
@@ -143,6 +175,16 @@ func BuildStart() {
 	queueScroll.SetMinSize(fyne.NewSize(0, 100))
 	queueContainer := container.NewVBox(queueStatus, queueScroll)
 	queueContainer.Hide()
+
+	// Empty-state hint: shown while the queue is empty and nothing is uploading.
+	emptyHint := widget.NewLabelWithStyle(
+		"Перетащите файлы сюда\nили нажмите Add files",
+		fyne.TextAlignCenter,
+		fyne.TextStyle{Italic: true},
+	)
+	emptyHint.Importance = widget.LowImportance
+	emptyHintBox := container.NewCenter(emptyHint)
+	emptyHintBox.Show()
 
 	// Upload status (e.g. "Uploading 2/5: photo.png")
 	uploadStatus := widget.NewLabel("")
@@ -180,10 +222,12 @@ func BuildStart() {
 		if n == 0 {
 			queueContainer.Hide()
 			queueStatus.Hide()
+			emptyHintBox.Show()
 			uploadAllButton.Disable()
 			uploadAllButton.SetText(ButtonUploadAll)
 			return
 		}
+		emptyHintBox.Hide()
 		queueStatus.SetText(fmt.Sprintf("%d file(s) selected", n))
 		queueStatus.Show()
 		queueContainer.Show()
@@ -309,8 +353,12 @@ func BuildStart() {
 
 		key, _ := MyApp.Settings.APIKey.Get()
 		if key == "" {
-			// Binding may be empty until Settings is opened; fall back to prefs.
-			key = MyApp.App.Preferences().String(SettingAPIKey)
+			// Binding may be empty until Settings is opened; fall back to the keystore.
+			key = storedAPIKey(MyApp.App.Preferences())
+		}
+		if key == "" {
+			// Last resort: environment variable (never hardcode keys in source).
+			key = strings.TrimSpace(os.Getenv(EnvAPIKey))
 		}
 
 		// Take ownership of the queue so the user can stage new files afterwards.
@@ -379,14 +427,22 @@ func BuildStart() {
 					for i, s := range successes {
 						urls[i] = s.URL
 					}
-					_ = linkBound.Set(uploadutil.JoinURLs(urls))
+					joined := uploadutil.JoinURLs(urls)
+					_ = linkBound.Set(joined)
+					// Auto-copy the result link(s) to the clipboard once the upload finishes.
+					MyApp.Window.Clipboard().SetContent(joined)
 					parsedURL, _ := url.Parse(last.URL)
+					currentResultURL = last.URL
 					if len(successes) == 1 {
 						resultWidget.SetText(last.URL)
+						resultTitle.SetText("Ссылка готова")
 					} else {
-						resultWidget.SetText(fmt.Sprintf("%d files uploaded (last: %s)", len(successes), last.FileName))
+						resultWidget.SetText(last.URL)
+						resultTitle.SetText(fmt.Sprintf("Загружено файлов: %d (показана последняя)", len(successes)))
 					}
 					resultWidget.SetURL(parsedURL)
+					resultStatus.SetText("Ссылка уже скопирована в буфер обмена")
+					copyLinkButton.SetText(ButtonCopy)
 					resultContainer.Show()
 
 					lastElementContainer.Objects = nil
@@ -406,64 +462,220 @@ func BuildStart() {
 			})
 		}()
 	})
+	uploadAllButton.Importance = widget.HighImportance
 	uploadAllButton.Disable()
 
-	containerButton := container.New(layout.NewHBoxLayout(), addFilesButton, uploadAllButton)
+	containerButton := container.New(layout.NewGridLayoutWithColumns(2), addFilesButton, uploadAllButton)
 
-	// set the container to the app to update text later with refresh
-	header2Container := buildHeader2()
-	MyApp.Containers = map[string]*fyne.Container{"header2": header2Container}
+	// Bottom account line (small, muted); updated via the username binding.
+	accountLine := buildAccountLine()
 
-	container00 := container.New(
-		layout.NewVBoxLayout(),
-		container.New(layout.NewHBoxLayout(), layout.NewSpacer(), buildLogo(), layout.NewSpacer()),
-		layout.NewSpacer(),
-		container.New(layout.NewHBoxLayout(), layout.NewSpacer(), buildHeader(), layout.NewSpacer()),
-		container.New(layout.NewHBoxLayout(), layout.NewSpacer(), header2Container, layout.NewSpacer()),
-		layout.NewSpacer(),
-		container.New(layout.NewHBoxLayout(), layout.NewSpacer(), containerButton, layout.NewSpacer()),
+	// Drop zone: rounded card with an upload icon. Files can also be dropped
+	// anywhere on the window; the card is the visual target.
+	queueArea := container.NewStack(
+		buildDropZone(emptyHintBox),
 		queueContainer,
+	)
+
+	// Custom top bar (replaces the system title bar in frameless mode).
+	// Left side: drag area. Right side: settings, minimize, close.
+	historyButton := topBarButton(theme.HistoryIcon(), func() {
+		BuildHistoryWindow()
+	})
+	gearButton := topBarButton(theme.SettingsIcon(), func() {
+		BuildSettingsWindow()
+	})
+	minimizeButton := topBarButton(theme.ContentRemoveIcon(), func() {
+		MinimizeNativeWindow(MyApp.Window)
+	})
+	closeButton := topBarButton(theme.WindowCloseIcon(), func() {
+		MyApp.Window.Close()
+	})
+	controls := container.NewHBox(historyButton, gearButton, minimizeButton, closeButton)
+
+	// Title on the left (muted), empty drag area in the middle, controls on the right.
+	titleLabel := widget.NewLabel("DRAINY")
+	titleLabel.TextStyle = fyne.TextStyle{Bold: true}
+	titleLabel.Importance = widget.LowImportance
+	dragArea := newDragArea(MyApp.Window)
+	topBar := container.NewBorder(nil, nil, titleLabel, controls, dragArea)
+
+	// Bottom line: account name, small and muted.
+	copyrightLine := buildCopyright()
+
+	body := container.NewVBox(
+		topBar,
+		queueArea,
+		containerButton,
 		uploadStatus,
 		containerProgressBar,
-		layout.NewSpacer(),
-		container.New(layout.NewHBoxLayout(), layout.NewSpacer(), resultContainer, layout.NewSpacer()),
-		layout.NewSpacer(),
-		buildUploadHistoryContainer(),
-		layout.NewSpacer(),
+		resultContainer,
 		container.New(layout.NewHBoxLayout(), layout.NewSpacer(), lastElementContainer, layout.NewSpacer()),
-		layout.NewSpacer(),
-		container.New(layout.NewHBoxLayout(), layout.NewSpacer(), buildCopyright(), layout.NewSpacer()),
+	)
+
+	container00 := container.NewBorder(
+		nil,
+		container.NewVBox(widget.NewSeparator(), accountLine, copyrightLine),
+		nil, nil,
+		container.NewPadded(body),
 	)
 
 	MyApp.Window.SetContent(container00)
-	MyApp.Window.ShowAndRun()
+
+	// Drag & drop: files dropped anywhere on the window go into the same queue
+	// as "Add files". Directories are skipped.
+	MyApp.Window.SetOnDropped(func(_ fyne.Position, items []fyne.URI) {
+		var paths []string
+		for _, u := range items {
+			if u == nil {
+				continue
+			}
+			paths = append(paths, u.Path())
+		}
+		stageDroppedPaths(paths, func(filePath, fileName string, cleanup func()) {
+			fyne.Do(func() { appendPending(filePath, fileName, cleanup) })
+		})
+	})
+
+	// Command-line / "Send to" integration: files passed as arguments are queued
+	// and uploaded right away, skipping the manual picker.
+	if argPaths := filesFromArgs(os.Args[1:]); len(argPaths) > 0 {
+		for _, p := range argPaths {
+			local, readable := fileprep.ReadableLocalFile(p)
+			if !readable {
+				continue
+			}
+			appendPending(local, fileprep.SanitizeFileName(filepath.Base(local)), nil)
+		}
+		if len(pending) > 0 {
+			// Start the upload once the window is up.
+			go func() {
+				time.Sleep(300 * time.Millisecond)
+				fyne.Do(func() { uploadAllButton.OnTapped() })
+			}()
+		}
+	}
+
+	MyApp.Window.Show()
+	// Remove the system frame once the native window exists. fyne.Do runs the
+	// call on the main loop after the first frame.
+	fyne.Do(func() { MakeWindowFrameless(MyApp.Window) })
+	MyApp.App.Run()
 }
 
-func buildLogo() *fyne.Container {
-	image := canvas.NewImageFromResource(resourceGoPdGuiIconPng)
-	image.SetMinSize(fyne.NewSize(256, 256))
-	image.FillMode = canvas.ImageFillStretch
-	containerLogo := container.New(layout.NewCenterLayout(), image)
+// topBarButtonSize is the fixed size of every top-bar control (settings, history,
+// minimize, close) so the buttons match in all windows.
+var topBarButtonSize = fyne.NewSize(32, 32)
 
-	return containerLogo
+// topBarButton builds a borderless icon button of the shared top-bar size.
+// The fixed size wrapper stops icon-dependent sizing from making buttons uneven.
+func topBarButton(icon fyne.Resource, onTapped func()) fyne.CanvasObject {
+	btn := widget.NewButtonWithIcon("", icon, onTapped)
+	btn.Importance = widget.LowImportance
+	return container.NewGridWrap(topBarButtonSize, btn)
 }
 
-func buildHeader() *fyne.Container {
-	headline := widget.NewLabel(Headline)
-	headline.TextStyle = fyne.TextStyle{Bold: true}
-	return container.New(layout.NewCenterLayout(), headline)
+// dragArea is an invisible strip that starts a native window move on left-button
+// press. It fills the free space of the top bar.
+type dragArea struct {
+	widget.BaseWidget
+	win fyne.Window
 }
 
-func buildHeader2() *fyne.Container {
+func newDragArea(win fyne.Window) *dragArea {
+	d := &dragArea{win: win}
+	d.ExtendBaseWidget(d)
+	return d
+}
+
+func (d *dragArea) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(canvas.NewRectangle(color.Transparent))
+}
+
+// MouseDown starts the native drag on the primary (left) button.
+func (d *dragArea) MouseDown(ev *desktop.MouseEvent) {
+	if ev.Button == desktop.MouseButtonPrimary {
+		StartNativeDrag(d.win)
+	}
+}
+
+// MouseUp is required by desktop.Mouseable; nothing to do on release.
+func (d *dragArea) MouseUp(*desktop.MouseEvent) {}
+
+// stageDroppedPaths validates paths (files only) and queues them via add.
+// Unreadable entries are reported in one error dialog, like the file picker does.
+func stageDroppedPaths(paths []string, add func(filePath, fileName string, cleanup func())) {
+	var failMsgs []string
+	for _, p := range paths {
+		local, readable := fileprep.ReadableLocalFile(p)
+		if !readable {
+			failMsgs = append(failMsgs, fmt.Sprintf("%s: not a readable file", filepath.Base(p)))
+			continue
+		}
+		add(local, fileprep.SanitizeFileName(filepath.Base(local)), nil)
+	}
+	if len(failMsgs) > 0 {
+		fyne.Do(func() {
+			dialog.ShowError(
+				fmt.Errorf("%d path(s) could not be added:\n%s", len(failMsgs), strings.Join(failMsgs, "\n")),
+				MyApp.Window,
+			)
+		})
+	}
+}
+
+// filesFromArgs returns the arguments that look like existing file paths.
+// Flags (starting with "-") are ignored.
+func filesFromArgs(args []string) []string {
+	var out []string
+	for _, a := range args {
+		a = strings.Trim(strings.TrimSpace(a), `"`)
+		if a == "" || strings.HasPrefix(a, "-") {
+			continue
+		}
+		if info, err := os.Stat(a); err == nil && !info.IsDir() {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// buildDropZone wraps the hint in a rounded, padded card with an upload icon.
+// The hint is the empty-state content; the card is hidden when the queue has files.
+func buildDropZone(hint *fyne.Container) *fyne.Container {
+	icon := widget.NewIcon(theme.UploadIcon())
+	iconBox := container.New(layout.NewCenterLayout(), icon)
+	inner := container.NewPadded(container.NewVBox(
+		layout.NewSpacer(),
+		iconBox,
+		hint,
+		layout.NewSpacer(),
+	))
+	card := widget.NewCard("", "", inner)
+	return container.NewPadded(card)
+}
+
+// buildAccountLine shows the current profile in small, muted text above the license line.
+func buildAccountLine() *fyne.Container {
 	usern := MyApp.App.Preferences().String(SettingUsername)
 	if usern != "" {
 		_ = MyApp.Settings.Username.Set(usern)
 	}
+	if usern == "" {
+		usern = "не подключен"
+	}
 
-	textStart := widget.NewLabel("Hello")
-	textEnd := widget.NewLabel(", lets upload some files!")
-	usernameBinding := widget.NewLabelWithData(MyApp.Settings.Username)
-	return container.New(layout.NewHBoxLayout(), textStart, usernameBinding, textEnd)
+	// Small, muted text. canvas.Text supports TextSize; it is refreshed from the
+	// bound username so the line stays current after Settings are saved.
+	line := canvas.NewText("Аккаунт: "+usern, theme.DisabledColor())
+	line.TextSize = 11
+	MyApp.Settings.Username.AddListener(binding.NewDataListener(func() {
+		name, _ := MyApp.Settings.Username.Get()
+		line.Text = "Аккаунт: " + name
+		fyne.Do(func() { line.Refresh() })
+	}))
+
+	return container.New(layout.NewCenterLayout(), line)
 }
 
 func buildCopyright() *fyne.Container {
@@ -473,15 +685,6 @@ func buildCopyright() *fyne.Container {
 	containerEnd.Resize(fyne.NewSize(0, 50))
 
 	return containerEnd
-}
-
-// History Container
-func buildUploadHistoryContainer() *fyne.Container {
-	historyButton := widget.NewButtonWithIcon("Show History", theme.InfoIcon(), func() {
-		BuildHistoryWindow()
-	})
-
-	return container.New(layout.NewCenterLayout(), historyButton)
 }
 
 // materializeForUpload returns a real local filesystem path for go-pd's
@@ -544,34 +747,15 @@ func upload(filePath, fileName, key string, progressBar *widget.ProgressBar, fil
 		fileIndex = 0
 	}
 
-	req := &pd.RequestUpload{
-		PathToFile: filePath,
-		FileName:   fileName,
-		Anonymous:  true,
-	}
-	if key != "" {
-		req.Anonymous = false
-		req.Auth.APIKey = key
-	}
-
-	c := pd.New(nil, nil)
-	c.SetUploadCallback(func(info req2.UploadInfo) {
-		if info.FileSize <= 0 {
+	// Streamed multipart upload with a 4 MiB io.CopyBuffer (see uploadutil.UploadFile).
+	return uploadutil.UploadFile(filePath, fileName, key, func(written, total int64) {
+		if total <= 0 {
 			return
 		}
-		fraction := float64(info.UploadedSize) / float64(info.FileSize)
+		fraction := float64(written) / float64(total)
 		overall := uploadutil.MultiFileProgress(fileIndex, fileTotal, fraction)
 		fyne.Do(func() {
 			progressBar.SetValue(overall)
 		})
 	})
-	rsp, err := c.UploadPOST(req)
-	if err != nil {
-		return "", err
-	}
-	if rsp == nil {
-		return "", errors.New("empty response from pixeldrain")
-	}
-
-	return rsp.GetFileURL(), nil
 }

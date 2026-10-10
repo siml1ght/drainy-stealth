@@ -1,0 +1,5 @@
+// Windows resource script: embeds the application icon into Drainy.exe.
+// Compiled into rsrc.syso by build.bat; Go links it into the executable automatically.
+
+// Icon resource ID 1 is the one Windows Explorer uses for the .exe file icon.
+1 ICON "app.ico"

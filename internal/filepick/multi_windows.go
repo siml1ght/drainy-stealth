@@ -5,6 +5,7 @@ package filepick
 import (
 	"path/filepath"
 	"syscall"
+	"unicode/utf16"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -68,10 +69,10 @@ func OpenMultiple(title string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	filterPtr, err := windows.UTF16PtrFromString("All Files (*.*)\x00*.*\x00")
-	if err != nil {
-		return nil, err
-	}
+	// Filter must be "Name\0Pattern\0\0". UTF16PtrFromString rejects embedded NULs,
+	// so encode the filter manually and keep the double-NUL terminator.
+	filter := utf16.Encode([]rune("All Files (*.*)\x00*.*\x00\x00"))
+	filterPtr := &filter[0]
 
 	ofn := openFileNameW{
 		StructSize: uint32(unsafe.Sizeof(openFileNameW{})),

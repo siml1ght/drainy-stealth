@@ -8,3 +8,7 @@ fyne-cross/tmp/
 # staged packages for GoReleaser + GoReleaser output
 release-assets/
 dist/
+
+# local Windows build outputs (build.bat)
+Drainy.exe
+rsrc.syso

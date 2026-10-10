@@ -4,15 +4,8 @@ A free easy to use cross plattform upload tool for pixeldrain.com.
 * Linux x64
 * Android APK ARM / ARM64
 
-![Go-PD-GUI-DRAINY](assets/go-pd-gui-icon.png)
-
 **Current version:** v1.4.1 · [Changelog](CHANGELOG.md)
 
-## Preview
-![Go-PD](assets/go-pd-gui-preview.gif)
-
-Progress bar
-![Go-PD-Progress](assets/go-pd-gui-progress-bar.gif)
 
 ## Download binaries
 
@@ -41,12 +34,28 @@ Pre-built packages are published on the [GitHub Releases](https://github.com/Man
 ### Core
 
 * Upload to [pixeldrain.com](https://pixeldrain.com)
-* Optional API-Key authentication (saved in user settings)
+* Optional API-Key authentication. On Windows the key is stored in Windows Credential Manager (encrypted for your account), never in a plain-text file.
 * Real progress bar (0–100%) during transfer
 * Result hyperlink + **Copy** button
 * Last uploaded file on the main screen
 * Remote upload history (with API key)
 * Cross-platform builds: Windows x32/x64, Linux x64, Android ARM / ARM64
+
+## API key
+
+* **Windows:** enter the key in Settings. It is saved in Windows Credential Manager and read back on the next start.
+* **Linux / Android:** the key is not saved between runs. Enter it again, or set the environment variable `PIXELDRAIN_API_KEY` before starting the app.
+* Without a key, uploads are anonymous and the History window stays empty.
+
+## Building on Windows
+
+Requirements: Go 1.25+, a C compiler for cgo (MinGW-w64, e.g. w64devkit), and optionally [Inno Setup 6](https://jrsoftware.org/isinfo.php) for the installer.
+
+```
+build.bat
+```
+
+Produces `Drainy.exe` (no console window, icon embedded) and `dist\Drainy-Setup.exe` if Inno Setup is installed.
 
 ## Changelog
 
